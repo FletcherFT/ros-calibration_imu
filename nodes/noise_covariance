@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+
+
+import rospy
+from sensor_msgs.msg import Imu, MagneticField
+from message_filters import Subscriber, TimeSynchronizer
+from collections import deque
+import numpy as np
+import yaml
+
+
+class CovarianceListener:
+    def __init__(self):
+        self._imu_name = rospy.get_param("~imu_name", "imu")
+        self._buffer = deque(maxlen=rospy.get_param("~num_samples", 100))
+        self._subscribers = (Subscriber("imu/data_raw", Imu),
+                             Subscriber("imu/mag_raw", MagneticField))
+        self._sync = TimeSynchronizer(self._subscribers, queue_size=100)
+        self._sync.registerCallback(self._sample)
+
+    def _sample(self, imu_msg: Imu, mag_msg: MagneticField):
+        rospy.loginfo_throttle(0.5, f"{rospy.get_name()}: Collected {len(self._buffer) + 1} out of {self._buffer.maxlen} samples.")
+        a = [imu_msg.linear_acceleration.x, imu_msg.linear_acceleration.y, imu_msg.linear_acceleration.z]
+        g = [imu_msg.angular_velocity.x, imu_msg.angular_velocity.y, imu_msg.angular_velocity.z]
+        m = [mag_msg.magnetic_field.x, mag_msg.magnetic_field.y, mag_msg.magnetic_field.z]
+        self._buffer.append(a + g + m)
+        if len(self._buffer) == self._buffer.maxlen:
+            self._stop()
+            rospy.loginfo(f"{rospy.get_name()}: Sampling complete, writing covariance to {self._imu_name + '_covariance.yaml'}")
+            data = np.array(list(self._buffer)).T
+            cov_a = np.cov(data[:3, :])
+            cov_g = np.cov(data[3:6, :])
+            cov_m = np.cov(data[6:, :])
+            output = dict(linear_acceleration_covariance=cov_a.ravel().tolist(),
+            angular_velocity_covariance=cov_g.ravel().tolist(),
+            magnetic_field_covariance=cov_m.ravel().tolist())
+            with open(self._imu_name + "_covariance.yaml", "w") as f:
+                yaml.dump(output, f)
+            rospy.signal_shutdown(f"{rospy.get_name()}: Exiting.")
+            
+    def _stop(self):
+        [s.sub.unregister() for s in self._subscribers]
+
+
+if __name__ == "__main__":
+    rospy.init_node("imu_covariance_sampler")
+    a = CovarianceListener()
+    rospy.spin()
